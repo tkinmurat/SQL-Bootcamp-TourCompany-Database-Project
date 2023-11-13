@@ -1,0 +1,162 @@
+----20den aşağı servis ücreti giremez
+
+ALTER TRIGGER [dbo].[ServisUcretKısıtlaması]
+ON [dbo].[Bölgeler]
+FOR INSERT
+AS
+BEGIN
+    IF EXISTS (
+        SELECT i.ServiceFee
+        FROM inserted i
+        WHERE ServiceFee < 20 AND RegionID <> 1
+    )
+    BEGIN
+        RAISERROR ('Servis ücreti 20TLden yukarı olmalıdır.', 1, 1);
+        ROLLBACK TRANSACTION;
+        RETURN;
+    END
+END;
+
+
+-----turlardan faturalara totalcost aktarımı ve 60 yaş üzerine %15 indirim
+
+ALTER TRIGGER [dbo].[tr_UpdateFaturalarTotalCost]
+ON [dbo].[Faturalar]
+AFTER INSERT
+AS
+BEGIN
+    DECLARE @TouristBirthDate DATE;
+    DECLARE @TouristID INT;
+    DECLARE @DiscountRate DECIMAL(5, 2);
+
+    SELECT @TouristID = TouristID, @TouristBirthDate = BirthDate
+    FROM Turistler
+    WHERE TouristID IN (SELECT TouristID FROM inserted);
+
+    -- Calculate age based on BirthDate
+    DECLARE @Age INT;
+    SET @Age = DATEDIFF(YEAR, @TouristBirthDate, GETDATE());
+
+    -- Calculate discount rate based on age
+    IF @Age >= 60
+        SET @DiscountRate = 0.85;
+    ELSE
+        SET @DiscountRate = 1;
+
+    -- Update TotalCost with discount
+    UPDATE F
+    SET F.TotalCost =(T.TotalCost * @DiscountRate)
+    FROM Faturalar F
+    JOIN Turlar T ON F.TourID = T.TourID
+    INNER JOIN inserted I ON F.InvoiceID = I.InvoiceID;
+END;
+
+---fatura kodu oluşturma
+
+ALTER TRIGGER [dbo].[tr_UpdateInvoiceName]
+ON [dbo].[Faturalar]
+AFTER INSERT
+AS
+BEGIN
+    DECLARE @InvoiceID INT, @InvoiceN NVARCHAR(100), @FormattedInvoiceName NVARCHAR(100)
+    SELECT @InvoiceID = InvoiceID FROM INSERTED
+    SELECT @InvoiceN = InvoiceN FROM INSERTED
+
+
+    DECLARE @CurrentDate DATE
+    SET @CurrentDate = GETDATE()
+
+    --- fatura tarihini istediğiniz formatta oluşturmak için convert
+    DECLARE @FormattedDate NVARCHAR(10)
+    SET @FormattedDate = CONVERT(NVARCHAR(10), @CurrentDate, 112)
+
+    ---- InvoiceName oluştuma
+    SET @FormattedInvoiceName = 'FTR' + @FormattedDate + RIGHT('00000' + CAST(@InvoiceID AS NVARCHAR(5)), 4)
+
+    -- UPDATE sorgusu ile InvoiceName'i güncelliyoruz
+    UPDATE Faturalar
+    SET InvoiceN = @FormattedInvoiceName
+    WHERE InvoiceID = @InvoiceID
+END;
+
+
+-----aynı kayıttan açmama
+
+ALTER TRIGGER [dbo].[DuplicateTuristEngelleme]
+ON [dbo].[Turistler]
+FOR INSERT
+AS
+BEGIN
+    IF EXISTS (
+        SELECT t.PassportID
+        FROM Turistler t
+        inner JOIN inserted i ON t.PassportID = i.PassportID
+		 WHERE t.TouristID <> i.TouristID
+    )
+    BEGIN
+        RAISERROR ('Bu PassportID zaten kullanımda.', 16, 1);
+        ROLLBACK;
+        RETURN;
+    END;
+END;
+
+
+
+----turlar update totalcost
+
+ALTER TRIGGER [dbo].[tr_UpdateTotalCostTurlar]
+ON [dbo].[Turlar]
+AFTER INSERT, UPDATE, DELETE
+AS
+BEGIN
+    UPDATE T
+    SET TotalCost = ISNULL(B1.ServiceFee, 0) + ISNULL(B2.ServiceFee, 0) + ISNULL(B3.ServiceFee, 0)
+    FROM Turlar T
+    LEFT JOIN Bölgeler B1 ON T.RotateID = B1.RegionID
+    LEFT JOIN Bölgeler B2 ON T.Rotate2ID = B2.RegionID
+    LEFT JOIN Bölgeler B3 ON T.Rotate3ID = B3.RegionID
+    WHERE T.TourID IN (SELECT TourID FROM INSERTED) OR T.TourID IN (SELECT TourID FROM DELETED);
+END;
+
+--------yas engelleme
+
+ALTER TRIGGER [dbo].[YasEngelleme]
+ON [dbo].[Turistler]
+FOR INSERT
+AS
+BEGIN
+    IF EXISTS (
+        SELECT t.BirthDate
+        FROM Turistler t
+        inner JOIN inserted i ON t.BirthDate = i.BirthDate
+		 WHERE GETDATE() < i.BirthDate
+    )
+	
+    BEGIN
+        RAISERROR ('Mevcut tarihten ileriki bir tarihe giriş yapamazsınız.', 1, 1);
+        ROLLBACK;
+        RETURN;
+    END;
+
+
+END;
+
+
+-------rotateıd'ye 0 değeri girilmez
+
+CREATE TRIGGER RotateIDdegerEngelleme
+ON turlar
+FOR INSERT, UPDATE
+AS
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM inserted
+        WHERE RotateID = 0
+    )
+    BEGIN
+        RAISERROR('RotateIDye 0 değeri giremezsiniz.', 1, 1);
+        ROLLBACK TRANSACTION;
+        RETURN;
+    END;
+END;
